@@ -1,6 +1,6 @@
 ---
 title: "Meningioma interaction analysis"
-author: "Quinn Ostrom"
+author: "Mackenzie Price; Quinn Ostrom"
 date: "`r Sys.Date()`"
 output: word_document
 ---
