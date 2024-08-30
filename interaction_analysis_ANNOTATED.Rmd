@@ -1,0 +1,1223 @@
+---
+title: "Meningioma interaction analysis"
+author: "Quinn Ostrom"
+date: "`r Sys.Date()`"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+##SETTINGS TO KNIT DOCUMENT FOR EXPORT
+knitr::opts_chunk$set(echo = TRUE)
+
+##LOAD PACKAGES FOR ANALYSIS
+librarian::shelf(SEER2R,tidyverse,contrast,modelbased,gtsummary,flextable,officer,ggrepel,usmap)
+
+##SET WORKING DIRECTORY
+# setwd("C:\\Users\\qo\\Box\\Home Folder qo\\Sharing\\Projects\\CBTRUS\\Meningioma_interaction")
+setwd("C:/Users/macke/Box/CBTRUS/Meningioma_interaction")
+
+##FUNCTION CREATED TO CLEAN RATE RATIO DATA FOR PRINTING IN TABLES
+reformat_contrast <- function(x) {
+  data.frame(x) %>%
+    dplyr::mutate_at(.vars=vars( Ratio,CI_low,CI_high,SE, z), ~sprintf("%.2f",.x)) %>%
+    dplyr::mutate(ratio_print=paste(Ratio," (",CI_low,"-",CI_high,")",sep=""),
+                  p_print =ifelse(p<0.001,"<0.001",sprintf("%.3f",p))) %>%
+    dplyr::select(Level1,Level2,ratio_print,SE,df,z,p_print) %>%
+    dplyr::rename("p"="p_print")
+}
+
+##SET THEME FOR TABLES TO BE EXPORTED
+gtsummary::theme_gtsummary_printer(print_engine = c("flextable"),set_theme = TRUE)
+```
+
+```{R}
+##SEER2R PACKAGE WAS DEPRECIATED, THIS SECTION MANUALLY ADDS THE FUNCTIONS FOR USE IN LOADING IN FILES FROM SEER*STAT
+# SEER2R is a package used for reading data from and writing data to SEET*STAT data format
+# https://github.com/cran/SEER2R
+# SEER*STAT plain data are represented in two files: dic and txt files. The dic file contains  variable information and the txt file contains data in columns.
+
+
+######################
+# private functions
+######################
+#' accessory functions
+.string.trimleadingtrailing <- function(string){
+  #    input   see the parameter list
+  #    return  result
+  
+  result <-  sub("^[[:space:]]*(.*?)[[:space:]]*$", "\\1", string, perl=TRUE)
+  
+}
+
+.string.cutSubStringFileExtension <- function(FileName){
+  #    input   see the parameter list
+  #    return  result
+  ExtRegularExpr <- c("[.][^.]*$");
+  result <-  sub(ExtRegularExpr, "", FileName, perl=TRUE);
+  result;
+}
+
+.catStr=function(myStr, ...,sep=""){
+  result=paste(
+    paste(myStr,collapse="",sep=sep),
+    ...,
+    sep=sep  
+  );
+}
+
+.create.emptyDataFrame.string=function(ColNames){
+  
+  TableContentData=data.frame();
+  NumCols=length(ColNames);
+  if(NumCols>0)
+    for(ColIndex in 1:NumCols){
+      TableContentData=cbind(TableContentData,data.frame(numeric(0)));
+    }
+  colnames(TableContentData)=ColNames;
+  TableContentData;
+}
+.is.empty=function(x){
+  if(class(x) == "data.frame"){
+    result=(dim(x)[1]*dim(x)[2] == 0)
+  }else{
+    result=(length(as.vector(x)) == 0);
+  }
+  result;
+}
+
+.removeACharAll = function(char, string){
+  result <-  gsub(char, "\\1", as.character(string), perl=TRUE)
+}
+
+.removeQuoteAll = function(string){
+  result <-  .removeACharAll("\"",string);
+}
+
+.addQuoteIfSpaceAtEnd = function(string){
+  string = as.character(string);
+  Pattern1 = "^[[:space:]]+";
+  Pattern2 = "[[:space:]]+$";
+  ReturnedStr = string;
+  SpaceAtEnd = (length(grep(Pattern1, string)) == 1) || (length(grep(Pattern2, string)) == 1);
+  if(SpaceAtEnd){
+    ReturnedStr = .catStr("\"",string,"\"");
+  }
+  return(ReturnedStr);
+}
+
+.is.substring = function(x, string){
+  return(length(grep(x, string,ignore.case = TRUE)) == 1);
+}
+
+.substituteColNames = function(ByVarNamesInF, ByVarsDataColNamesInF, ColNamesInF){
+  NumNamesInF = length(ColNamesInF);
+  NumByVarNamesInF = length(ByVarNamesInF);
+  ColIndexByVar = numeric(NumByVarNamesInF);
+  if(NumNamesInF > 0 && NumByVarNamesInF > 0)
+    for(VInd in 1:NumByVarNamesInF){
+      for(NameInd in 1:NumNamesInF){
+        #      if(.is.substring(ByVarNamesInF[VInd], gsub("_"," ", ColNamesInF[NameInd]))){
+        if(.is.substring(ByVarNamesInF[VInd], ColNamesInF[NameInd])){
+          ColNamesInF[NameInd] = ByVarsDataColNamesInF[VInd];
+          ColIndexByVar[VInd] = NameInd;
+          break;
+        }
+      }
+    }
+  return(list(ColNamesInF = ColNamesInF,ColIndexByVar = ColIndexByVar));
+}
+
+.assignColNames = function(data,ColNames = NULL){
+  OldColNames = colnames(data);
+  if(!is.null(ColNames)){
+    NewColNameInfo = .substituteColNames(ColNames, ColNames, OldColNames);
+    colnames(data) = NewColNameInfo$ColNamesInF;
+    attr(data,"NewColNameInfo") = NewColNameInfo;
+  }
+  return(data);
+}
+
+.getSubDataByVarName = function(data,ColNames = NULL){
+  TempData = .assignColNames(data,ColNames = ColNames);
+  NewColNameInfo = attr(TempData,"NewColNameInfo");
+  GoodColIndics =  NewColNameInfo$ColIndexByVar[NewColNameInfo$ColIndexByVar>0];
+  NumByVars = length(GoodColIndics);
+  if(NumByVars > 0){
+    TempData1 = TempData[,GoodColIndics];
+    #attr(TempData1,"DICInfo") = attr(TempData,"DICInfo");
+  }else{
+    TempData1 = TempData;
+  }
+  return(TempData1);
+}
+
+#############################
+# package specific functions
+#############################
+
+.replaceLabOrNum = function(VarFormatSecListInF, dataInF, LabReplaced = TRUE){
+  #LabReplaced = TRUE: means that current values are Labels, and will be replaced with numeric values
+  #columns of  VarFormatSecListInF[[VarIndex]]: Numeric, Labels
+  NumVars = length(VarFormatSecListInF);
+  if(NumVars > 0){
+    for(VarIndex in 1:NumVars){
+      cntSection = VarFormatSecListInF[[VarIndex]];
+      if(!.is.empty(cntSection)){
+        NumLabels = dim(cntSection)[1];
+        for(LabIndex in 1:NumLabels){
+          ValueOnCheck = as.character(cntSection[LabIndex,1]);
+          ValueAssigned = .removeQuoteAll(cntSection[LabIndex,2]);
+          if(LabReplaced){
+            ValueOnCheck = .removeQuoteAll(as.character(cntSection[LabIndex,2]));
+            ValueAssigned = cntSection[LabIndex,1];
+          }
+          dataInF[as.character(dataInF[,VarIndex]) == ValueOnCheck,VarIndex] = ValueAssigned; 
+        }   
+      }
+    }
+  }
+  return(dataInF);
+}
+
+#' @include myLib.r
+#' @callGraph
+.read.SeerStatDIC = function(DICfileName){
+  #   input: 
+  #      DICfileName: 
+  #   returned: (see the end of the function definition)
+  
+  DicFileInF = DICfileName;
+  lines = readLines(DicFileInF);
+  
+  #function for reading a section
+  findSectionInfo = function(lines,Pattern,splitchar="=",addedToName="",IsPatternStr=FALSE) {
+    #if IsPatternStr=FALSE, Pattern is regular expression
+    ItemInfo=data.frame("ItemNameInDic"=numeric(0),"ItemValueInDic"=numeric(0));
+    SectionName=character();
+    if(length(lines)>0)
+      for(LineInd in 1:length(lines)){
+        if(length(grep(Pattern, lines[LineInd], fixed=IsPatternStr)) == 1){
+          ItemInd = 1;
+          ItemLineInd=1;
+          SectionName=.string.trimleadingtrailing(lines[LineInd]);
+          while(lines[LineInd + ItemLineInd] != "" ){
+            if(length(grep(splitchar, lines[LineInd + ItemLineInd])) == 1){
+              ItemNames = unlist(strsplit(lines[LineInd + ItemLineInd], split=splitchar));
+              if(length(ItemNames) == 2){
+                ItemInfo[ItemInd,] = c(paste(as.character(ItemNames[1]),addedToName,sep=""),as.character(ItemNames[2]));
+              }else{
+                ItemInfo[ItemInd,1] = paste(as.character(ItemNames[1]),addedToName,sep="");
+              }
+              ItemInd = ItemInd + 1;
+            }
+            ItemLineInd = ItemLineInd + 1;
+          }
+        }
+      }
+    attr(ItemInfo, "SectionNameInDIC") = SectionName;
+    return(ItemInfo);
+  }
+  
+  #read sections:
+  #   System 
+  SystemInfo = findSectionInfo(lines,Pattern="System[]]",splitchar="=",addedToName="");
+  #   Session Options 
+  SessionOptionInfo = findSectionInfo(lines,Pattern="Session Options[]]",splitchar="=",addedToName="");
+  #   Export Options 
+  ExportOptionInfo = findSectionInfo(lines,Pattern="Export Options[]]",splitchar="=",addedToName="");
+  #   VarAllInfo 
+  VarAllInfo = findSectionInfo(lines,Pattern="Variables[]]",splitchar="=",addedToName="");
+  
+  #   Variables of non-survival data, Page Variables of survival data
+  VarInfo = findSectionInfo(lines,Pattern="Variables[]]",splitchar="Name=",addedToName="Name");
+  VarBaseInfo = findSectionInfo(lines,Pattern="Variables[]]",splitchar="Base=",addedToName="Base");
+  VarFormatSecList = list();
+  VarDimInfo = findSectionInfo(lines,Pattern="Variables[]]",splitchar="Dimension=",addedToName="Dimension");
+  VarDimList = list();
+  
+  findVarFormatSecList = function(lines,VarBaseInfoInF,VarInfoInF){
+    NumBases = dim(VarBaseInfoInF)[1];
+    PageVar="Page type";
+    NumVars = dim(VarInfoInF)[1];
+    VarFormatSecListInF = list();
+    
+    if(NumVars > 0)
+      for(VarInd in NumVars:1){
+        cntVar = as.character(VarInfoInF[VarInd,"ItemNameInDic"]);
+        cntVarItemValueInDic = as.character(VarInfoInF[VarInd,"ItemValueInDic"]);
+        
+        cntPattern = cntVarItemValueInDic;
+        cntPattern = paste(cntPattern,"]",sep="");
+        VarFormatSecListInF[[VarInd]] = findSectionInfo(lines,Pattern=cntPattern,splitchar="=",IsPatternStr=T);
+        if(.is.empty(VarFormatSecListInF[[VarInd]]))
+          VarFormatSecListInF[[VarInd]] = NULL;
+        comments = function(){
+          #if the variable is Page type, then handle it
+          if(length(grep(PageVar, cntVarItemValueInDic)) == 1){
+            cntPattern = cntVarItemValueInDic;
+            cntPattern = paste(cntPattern,"]",sep="");
+            VarFormatSecListInF[[VarInd]] = findSectionInfo(lines,Pattern=cntPattern,splitchar="=",IsPatternStr=T);
+          }
+          if(NumBases > 0)
+            for(BaseInd in 1:NumBases){
+              cntBase = as.character(VarBaseInfoInF[BaseInd,"ItemNameInDic"]);
+              cntBase = unlist(strsplit(cntBase,"Base"))[1];
+              if(length(grep(cntBase, cntVar)) == 1){
+                cntPattern = cntVarItemValueInDic;
+                cntPattern = paste(cntPattern,"]",sep="");
+                VarFormatSecListInF[[VarInd]] = findSectionInfo(lines,Pattern=cntPattern,splitchar="=",IsPatternStr=T);
+              }
+            }
+        }
+      }
+    return(VarFormatSecListInF)
+  }
+  VarFormatSecList = findVarFormatSecList(lines,VarBaseInfo,VarInfo);
+  
+  PageVarNameInReadData = gsub("[,:()<>={}!@#$%^&*+-]", "", VarInfo[,"ItemValueInDic"]);
+  PageVarNameInReadData = gsub("[[:space:]]+", "_", PageVarNameInReadData);
+  Vars = data.frame(
+    "VarSymbolInDic" = VarInfo[,"ItemNameInDic"],
+    "VarNameInReadData" = PageVarNameInReadData,
+    "VarNameInTXT" = VarInfo[,"ItemValueInDic"]
+  );
+  
+  attr(Vars, "SectionNameInDIC") = attr(VarInfo, "SectionNameInDIC");
+  attr(Vars, "VarBaseInfo") = VarBaseInfo;
+  attr(Vars, "VarFormatSecList") = VarFormatSecList;
+  attr(Vars, "VarDimInfo") = VarDimInfo;
+  attr(Vars, "VarDimList") = VarDimList;
+  
+  returned=list(
+    SystemInfo=SystemInfo,
+    SessionOptionInfo = SessionOptionInfo,
+    ExportOptionInfo = ExportOptionInfo,
+    VarAllInfo = VarAllInfo,
+    
+    Vars = Vars,
+    VarBaseInfo = VarBaseInfo,
+    VarFormatSecList = VarFormatSecList,
+    VarDimInfo = VarDimInfo,
+    VarDimList = VarDimList
+  );
+}
+
+####
+##
+.getReadingOptionFromExportOption = function(ExportOptionInfoInF){
+  #   header = FALSE, sep = "", quote = "\"'",
+  #   na.strings = "NA"
+  #   gzfile("file.text.gz")
+  rownames(ExportOptionInfoInF)=ExportOptionInfoInF$ItemNameInDic;
+  GZipped = FALSE;
+  if("GZipped" %in% ExportOptionInfoInF$ItemNameInDic){
+    GZipped = ifelse(ExportOptionInfoInF["GZipped",2] == "true", TRUE, FALSE);
+  }
+  
+  VariableformatNum = FALSE;
+  quotedlabels = TRUE;
+  if("Variable format" %in% ExportOptionInfoInF$ItemNameInDic){
+    VariableformatNum = !(length(grep("label", ExportOptionInfoInF["Variable format",2])) == 1);
+    quotedlabels = ifelse(ExportOptionInfoInF["Variable format",2] == "quotedlabels", TRUE, FALSE);
+  }
+  
+  FileformatIsDOS = TRUE;
+  if("File format" %in% ExportOptionInfoInF$ItemNameInDic){
+    FileformatIsDOS = ifelse(ExportOptionInfoInF["File format",2] == "DOS/Windows", TRUE, FALSE);
+  }
+  
+  Fielddelimiter = "\t";
+  if("Field delimiter" %in% ExportOptionInfoInF$ItemNameInDic){
+    Fielddelimiter = ifelse(ExportOptionInfoInF["Field delimiter",2] == "space", " ", 
+                            ifelse(ExportOptionInfoInF["Field delimiter",2] == "comma", ",",
+                                   ifelse(ExportOptionInfoInF["Field delimiter",2] == "semi-colon", ";", "\t")        
+                            ));
+  }
+  
+  MissingCh = ".";
+  if("Missing character" %in% ExportOptionInfoInF$ItemNameInDic){
+    MissingCh = ifelse(ExportOptionInfoInF["Missing character",2] == "period", ".", " ");
+  }
+  
+  FieldsValuewithdelimiterinquotes = FALSE;
+  if("Fields with delimiter in quotes" %in% ExportOptionInfoInF$ItemNameInDic){
+    FieldsValuewithdelimiterinquotes = ifelse(ExportOptionInfoInF["Fields with delimiter in quotes",2] == "true", TRUE, FALSE);
+  }
+  
+  VarNameIncluded = TRUE;
+  if("Variable names included" %in% ExportOptionInfoInF$ItemNameInDic){
+    VarNameIncluded = ifelse(ExportOptionInfoInF["Variable names included",2] == "true", TRUE, FALSE);
+  }
+  
+  return(list(
+    GZipped = GZipped,
+    VariableformatNum = VariableformatNum,
+    quotedlabels = quotedlabels,
+    FileformatIsDOS = FileformatIsDOS,
+    Fielddelimiter = Fielddelimiter,
+    MissingCh = MissingCh,
+    FieldsValuewithdelimiterinquotes = FieldsValuewithdelimiterinquotes,
+    VarNameIncluded = VarNameIncluded
+  ));
+  
+}
+
+
+
+#' @include myLib.r
+#' @callGraph
+.read.SeerStatTXT = function(DICfileName, TXTfileName, UseVarLabelsInData=FALSE,ReadHeaderOnly=FALSE,...){
+  #   input: 
+  #      DICfileName, TXTfileName 
+  #   returned: (see the end of the function definition)
+  
+  InfoFromDIC=.read.SeerStatDIC(DICfileName);
+  ReadingOptionInfo = .getReadingOptionFromExportOption(InfoFromDIC$ExportOptionInfo);
+  NumVars = length(InfoFromDIC$VarFormatSecList);
+  if(NumVars == 0)
+    UseVarLabelsInData = TRUE;
+  
+  DICInfo = list(
+    SystemInfo = InfoFromDIC$SystemInfo,
+    SessionOptionInfo = InfoFromDIC$SessionOptionInfo,
+    ExportOptionInfo = InfoFromDIC$ExportOptionInfo,
+    VarAllInfo = InfoFromDIC$VarAllInfo,
+    VarFormatSecList = InfoFromDIC$VarFormatSecList,
+    
+    UseVarLabelsInData = UseVarLabelsInData
+  )
+  #DataFile
+  if(!ReadHeaderOnly){
+    if(ReadingOptionInfo$GZipped){
+      if(is.null(TXTfileName)){
+        TXTfileName = paste(.string.cutSubStringFileExtension(DICfileName), ".gz",sep="");
+      }
+      DataFile = gzfile(TXTfileName);  
+    }else{
+      if(is.null(TXTfileName)){
+        TXTfileName = paste(.string.cutSubStringFileExtension(DICfileName), ".txt",sep="");
+      }
+      DataFile = TXTfileName;  
+    }
+    
+    #cntquote
+    cntquote = ifelse(!ReadingOptionInfo$VariableformatNum && ReadingOptionInfo$quotedlabels || ReadingOptionInfo$VarNameIncluded, "\"", "");  
+    NumSkippedLines = ifelse(ReadingOptionInfo$VarNameIncluded,1,0);
+    TXTData = read.table(DataFile, skip = NumSkippedLines, #header = ReadingOptionInfo$VarNameIncluded,
+                         sep = ReadingOptionInfo$Fielddelimiter, na.strings = ReadingOptionInfo$MissingCh,
+                         quote = cntquote, ...   
+    );
+    
+    colnames(TXTData) = InfoFromDIC$Vars$VarNameInReadData;
+    if(UseVarLabelsInData && NumVars > 0){
+      TXTData = .replaceLabOrNum(InfoFromDIC$VarFormatSecList, TXTData, LabReplaced = FALSE);
+    }
+  }else{
+    return(DICInfo);
+  }
+  attr(TXTData, "DICInfo") = DICInfo;
+  attr(TXTData, "assignColNames") = .assignColNames;
+  attr(TXTData, "getSubDataByVarName") = .getSubDataByVarName;
+  return(TXTData);
+}
+
+
+.write.SeerStatDIC.section = function(DICSection, filename, append=TRUE){
+  #Assume that DICSection has very thing required ready
+  SectionNameInDIC = attr(DICSection, "SectionNameInDIC");
+  outputStr = .catStr(SectionNameInDIC,"\n");
+  
+  NumRows = dim(DICSection)[1];
+  if(NumRows > 0)
+    for(RowIndex in 1:NumRows){
+      outputStr = .catStr(outputStr,
+                          DICSection$ItemNameInDic[RowIndex],
+                          "=",
+                          DICSection$ItemValueInDic[RowIndex],
+                          "\n"
+      );
+    }
+  write(outputStr, file=filename, sep="",append=append);
+}
+
+.assignItemValueToSecInfoVar = function(cntItemValue,cntItemName, cntSection){
+  SectionColNames = c("ItemNameInDic","ItemValueInDic");
+  if(cntItemName %in% cntSection$ItemNameInDic){
+    cntSection[cntItemName == cntSection$ItemNameInDic,2] = cntItemValue;
+  }else{
+    cntRow = .create.emptyDataFrame.string(SectionColNames);
+    cntRow[1,1] = cntItemName;
+    cntRow[1,2] = cntItemValue;
+    
+    cntSectionNameInDIC = attr(cntSection, "SectionNameInDIC");
+    cntSection = rbind(cntRow, cntSection);
+    attr(cntSection, "SectionNameInDIC") = cntSectionNameInDIC; 
+  }
+  return(cntSection);
+}
+
+.write.SeerStatDIC = function(DICInfo, DICfileName){
+  #   input: 
+  #      DICfileName, TXTfileName 
+  #   returned: 
+  #     a list storing info in DICfileName
+  .write.SeerStatDIC.section(DICInfo$SystemInfo, DICfileName, append=FALSE)
+  .write.SeerStatDIC.section(DICInfo$SessionOptionInfo, DICfileName, append=TRUE)
+  .write.SeerStatDIC.section(DICInfo$ExportOptionInfo, DICfileName, append=TRUE)
+  .write.SeerStatDIC.section(DICInfo$VarAllInfo, DICfileName, append=TRUE)
+  
+  NumMaxFormatSec = length(DICInfo$VarFormatSecList);
+  if(NumMaxFormatSec > 0)
+    for(VarCaseInd in 1:NumMaxFormatSec){
+      if(!.is.empty(DICInfo$VarFormatSecList[[VarCaseInd]]))
+        .write.SeerStatDIC.section(DICInfo$VarFormatSecList[[VarCaseInd]], DICfileName, append=TRUE);
+    }
+  
+  return(DICInfo);
+}
+
+.write.SeerStatTXT = function(myData, DICInfo,...){
+  
+  ReadingOptionInfo = .getReadingOptionFromExportOption(DICInfo$ExportOptionInfo);
+  
+  #DataFile
+  TXTfileName = DICInfo$SystemInfo["Output filename" == DICInfo$SystemInfo$ItemNameInDic,2];
+  if(ReadingOptionInfo$GZipped){
+    DataFile = gzfile(TXTfileName);  
+  }else{
+    DataFile = TXTfileName;  
+  }
+  #cntquote
+  cntquote = (!ReadingOptionInfo$VariableformatNum && ReadingOptionInfo$quotedlabels);
+  outputColNames = colnames(myData);
+  if(!cntquote)
+    outputColNames = paste("\"",outputColNames,"\"",sep="");
+  if(!ReadingOptionInfo$VarNameIncluded){
+    outputColNames = FALSE;
+  }
+  
+  write.table(myData, DataFile, col.names = outputColNames,
+              sep = ReadingOptionInfo$Fielddelimiter, na = ReadingOptionInfo$MissingCh,
+              quote = cntquote,
+              row.names = FALSE,...   
+  );
+}
+
+.prepareDICInfoAndData = function(dataInF,DICfileName,TXTfileName=NULL,UseVarLabelsInTxtFile=TRUE,LabVarsNames=NULL){
+  
+  DICInfo = attr(dataInF, "DICInfo");
+  SectionColNames = c("ItemNameInDic","ItemValueInDic");
+  if(is.null(DICInfo)){
+    DICInfo = list();
+    DICInfo$SystemInfo = .create.emptyDataFrame.string(SectionColNames);
+    attr(DICInfo$SystemInfo, "SectionNameInDIC") = "[System]";
+    DICInfo$SessionOptionInfo = .create.emptyDataFrame.string(SectionColNames);
+    attr(DICInfo$SessionOptionInfo, "SectionNameInDIC") = "[Session Options]";
+    DICInfo$ExportOptionInfo = .create.emptyDataFrame.string(SectionColNames);
+    attr(DICInfo$ExportOptionInfo, "SectionNameInDIC") = "[Export Options]";
+    DICInfo$VarAllInfo = .create.emptyDataFrame.string(SectionColNames);
+    attr(DICInfo$VarAllInfo, "SectionNameInDIC") = "[Life Page Variables]";
+    checkSurvData = function(ColNames){
+      IsSurvDataInF = FALSE;
+      NumNames = length(ColNames);
+      if(NumNames > 0)
+        for(NameIndex in 1:NumNames){
+          cntName = ColNames[NameIndex];
+          if( (length(grep("Page.*type", cntName)) == 1) ){
+            IsSurvDataInF = TRUE;
+            break;            
+          }
+        }
+      return(IsSurvDataInF);    
+    }
+    IsSurvData = checkSurvData(colnames(dataInF));
+    if( !IsSurvData )
+      attr(DICInfo$VarAllInfo, "SectionNameInDIC") = "[Variables]";
+    
+    DICInfo$VarFormatSecList = list();
+    
+    if(is.null(TXTfileName)){
+      TXTfileName = paste(.string.cutSubStringFileExtension(DICfileName), ".txt",sep="");
+    }
+    DICInfo$SystemInfo[1,1] = "Output filename";
+    DICInfo$SystemInfo[1,2] = TXTfileName;
+    
+    
+    #DICInfo$ExportOptionInfo
+    RowInd = 1;
+    DICInfo$ExportOptionInfo[RowInd,1] = "GZipped";
+    DICInfo$ExportOptionInfo[RowInd,2] = "false";
+    
+    RowInd = RowInd + 1;
+    DICInfo$ExportOptionInfo[RowInd,1] = "Variable format";
+    DICInfo$ExportOptionInfo[RowInd,2] = "quotedlabels";
+    if(!UseVarLabelsInTxtFile)
+      DICInfo$ExportOptionInfo[RowInd,2] = "numeric";
+    
+    RowInd = RowInd + 1;
+    DICInfo$ExportOptionInfo[RowInd,1] = "Field delimiter";
+    DICInfo$ExportOptionInfo[RowInd,2] = "tab";
+    
+    RowInd = RowInd + 1;
+    DICInfo$ExportOptionInfo[RowInd,1] = "Missing character";
+    DICInfo$ExportOptionInfo[RowInd,2] = "period";
+    
+    RowInd = RowInd + 1;
+    DICInfo$ExportOptionInfo[RowInd,1] = "Fields with delimiter in quotes";
+    DICInfo$ExportOptionInfo[RowInd,2] = "true";
+    
+    RowInd = RowInd + 1;
+    DICInfo$ExportOptionInfo[RowInd,1] = "Variable names included";
+    DICInfo$ExportOptionInfo[RowInd,2] = "false";
+    
+    #DICInfo$VarAllInfo
+    NumVars = dim(dataInF)[2];
+    VarNames = colnames(dataInF);
+    if(NumVars > 0)
+      for(VarIndex in 1:NumVars){
+        DICInfo$VarAllInfo[VarIndex,1] = paste("Var",VarIndex,"Name",sep="");
+        DICInfo$VarAllInfo[VarIndex,2] = VarNames[VarIndex];
+      }
+    if(!UseVarLabelsInTxtFile){
+      NumVars = dim(dataInF)[2];
+      VarNames = colnames(dataInF);
+      if(!is.null(LabVarsNames)){
+        VarsNamesOnCheck = LabVarsNames;
+      }else{
+        VarsNamesOnCheck = VarNames;
+      }
+      NumLabVars = length(VarsNamesOnCheck);
+      if(NumVars > 0 && NumLabVars > 0)
+        for(VarIndex in 1:NumVars){
+          for(LabVIndex in 1:NumLabVars){
+            if(as.character(VarsNamesOnCheck[LabVIndex]) == as.character(VarNames[VarIndex]) && 
+               (class(dataInF[,VarIndex]) == "character" || class(dataInF[,VarIndex]) == "factor")){
+              DistinctValues = dataInF[,VarIndex];
+              DistinctValues = levels(factor(DistinctValues));
+              NumValues = length(DistinctValues);
+              if(NumValues > 0){
+                DICInfo$VarFormatSecList[[VarIndex]] = .create.emptyDataFrame.string(SectionColNames);
+                for(ValueIndex in 1:NumValues){
+                  DICInfo$VarFormatSecList[[VarIndex]][ValueIndex,1] = ValueIndex -1;
+                  DICInfo$VarFormatSecList[[VarIndex]][ValueIndex,2] = .addQuoteIfSpaceAtEnd(DistinctValues[ValueIndex]);
+                }
+                cntSectionName = paste("[Format=",VarsNamesOnCheck[LabVIndex],"]",sep="");
+                attr(DICInfo$VarFormatSecList[[VarIndex]], "SectionNameInDIC") = cntSectionName;
+              }
+            }
+          }
+        }
+    }   
+    
+  }else{
+    ReadingOptionInfo = .getReadingOptionFromExportOption(DICInfo$ExportOptionInfo);
+    if(ReadingOptionInfo$GZipped){
+      if(is.null(TXTfileName)){
+        TXTfileName = paste(.string.cutSubStringFileExtension(DICfileName), ".gz",sep="");
+      }
+    }else{
+      if(is.null(TXTfileName)){
+        TXTfileName = paste(.string.cutSubStringFileExtension(DICfileName), ".txt",sep="");
+      }
+    }
+    if("Output filename" %in% DICInfo$SystemInfo$ItemNameInDic){
+      DICInfo$SystemInfo["Output filename" == DICInfo$SystemInfo$ItemNameInDic,2] = TXTfileName;
+    }else{
+      cntRow = .create.emptyDataFrame.string(SectionColNames);
+      cntRow[1,1] = "Output filename";
+      cntRow[1,2] = TXTfileName;
+      
+      cntSectionNameInDIC = attr(DICInfo$SystemInfo, "SectionNameInDIC");
+      DICInfo$SystemInfo = rbind(cntRow, DICInfo$SystemInfo);
+      attr(DICInfo$SystemInfo, "SectionNameInDIC") = cntSectionNameInDIC; 
+    }
+    
+    UseVarLabelsInDataWhenRead = DICInfo$UseVarLabelsInData;
+    if(is.null(UseVarLabelsInDataWhenRead)){
+      UseVarLabelsInTxtFile = TRUE;
+      DICInfo$VarFormatSecList = list();
+    }else{
+      if(UseVarLabelsInDataWhenRead){
+        if(UseVarLabelsInTxtFile){
+          DICInfo$ExportOptionInfo = .assignItemValueToSecInfoVar("quotedlabels","Variable format", DICInfo$ExportOptionInfo); 
+          DICInfo$VarFormatSecList = list();
+        }
+      }else{ #here numeric values in current data object
+        if(UseVarLabelsInTxtFile){
+          #replace labels for numeric values
+          dataInF = .replaceLabOrNum(DICInfo$VarFormatSecList, dataInF, LabReplaced = F)
+          DICInfo$ExportOptionInfo = .assignItemValueToSecInfoVar("quotedlabels","Variable format", DICInfo$ExportOptionInfo); 
+          DICInfo$VarFormatSecList = list();
+        }else{ #do nothing, just output DICInfo$VarFormatSecList and unchanged data object
+          
+        }
+        #UseVarLabelsInTxtFile always true: because data is ready for output, no need of changes
+        UseVarLabelsInTxtFile = TRUE;
+      }    
+    }    
+    if(!UseVarLabelsInTxtFile){
+      cntItemValue = "numeric";
+      DICInfo$ExportOptionInfo = .assignItemValueToSecInfoVar(cntItemValue,"Variable format", DICInfo$ExportOptionInfo); 
+    }
+  }
+  
+  NumVars = length(DICInfo$VarFormatSecList);
+  if(!UseVarLabelsInTxtFile && NumVars > 0){
+    dataInF = .replaceLabOrNum(DICInfo$VarFormatSecList, dataInF, LabReplaced = T);
+  }
+  
+  attr(dataInF, "DICInfo") = DICInfo;
+  return(dataInF);
+}
+
+
+#############################
+# exported functions
+#############################
+
+#' @export
+read.SeerStat = function(DICfileName, TXTfileName=NULL, UseVarLabelsInData=FALSE,ReadHeaderOnly=FALSE,...){
+  #   input: 
+  #      DICfileName, TXTfileName 
+  #   returned: 
+  #     an object of data.frame storing data in TXTfileName and info in DICfileName
+  if(!(length(grep("[.]dic$", DICfileName,ignore.case=TRUE)) == 1)){
+    DICfileName = paste(DICfileName, ".dic",sep="");
+  }
+  
+  return(.read.SeerStatTXT(DICfileName, TXTfileName, UseVarLabelsInData=UseVarLabelsInData,ReadHeaderOnly=ReadHeaderOnly,...));
+}
+
+
+#' @export
+write.SeerStat = function(myData, DICfileName, TXTfileName=NULL,UseVarLabelsInTxtFile=TRUE,LabVarsNames=NULL,...){
+  #   input: 
+  #      DICfileName, TXTfileName 
+  #   returned: 
+  #     a list storing info in DICfileName
+  if(!(length(grep("[.]dic$", DICfileName,ignore.case=TRUE)) == 1)){
+    DICfileName = paste(DICfileName, ".dic",sep="");
+  }
+  
+  #prepare DICInfo
+  myData = .prepareDICInfoAndData(myData,DICfileName,TXTfileName=TXTfileName,UseVarLabelsInTxtFile=UseVarLabelsInTxtFile,LabVarsNames=LabVarsNames);
+  DICInfo = attr(myData, "DICInfo");
+  
+  .write.SeerStatDIC(DICInfo, DICfileName);
+  .write.SeerStatTXT(myData, DICInfo,...);
+  return(DICInfo);
+}
+```
+
+```{r read_data, cache=TRUE, include=FALSE}
+##LOAD SEER*STAT FILES AND REFORMAT
+meningioma.data1 <- read.SeerStat("Meningioma_race_age_sex", UseVarLabelsInData = TRUE) %>%
+  dplyr::rename_all(make.names) %>%
+  dplyr::filter(Race.ethnicity_nototal %in% c("Non-Hispanic White","Non-Hispanic Black")) %>%
+  dplyr::mutate(Age_recode_with_single_ages_and_85 = as.numeric(gsub("\\D", "", Age_recode_with_single_ages_and_85)),
+                Count=as.numeric(Count),
+                Population=as.numeric(Population),
+                Race.ethnicity_nototal=relevel( factor(Race.ethnicity_nototal),ref="Non-Hispanic White"),
+                Sex_nototal=relevel(factor(Sex_nototal),ref="Female"),
+                Crude_Rate = (Count /Population )*100000,
+                age_group=cut(Age_recode_with_single_ages_and_85,breaks = seq(0,90,10),include.lowest = TRUE,right=F))
+
+meningioma.data2 <- read.SeerStat("Meningioma_race_age_sex_grade", UseVarLabelsInData = TRUE) %>%
+  dplyr::rename_all(make.names) %>%
+  dplyr::filter(Race.ethnicity_nototal %in% c("Non-Hispanic White","Non-Hispanic Black")) %>%
+  dplyr::mutate(Age_recode_with_single_ages_and_85 = as.numeric(gsub("\\D", "", Age_recode_with_single_ages_and_85)),
+                Race.ethnicity_nototal=relevel( factor(Race.ethnicity_nototal),ref="Non-Hispanic White"),
+                Sex_nototal=relevel(factor(Sex_nototal),ref="Female"),
+                Crude_Rate = (Count /Population )*100000,
+                age_group=cut(Age_recode_with_single_ages_and_85,breaks = seq(0,90,10),include.lowest = TRUE,right=F))
+
+meningioma.data3 <- read.SeerStat("Meningioma_race_age_sex_confirmation", UseVarLabelsInData = TRUE) %>%
+  dplyr::rename_all(make.names) %>%
+  dplyr::filter(Race.ethnicity_nototal %in% c("Non-Hispanic White","Non-Hispanic Black")) %>%
+  dplyr::mutate(Age_recode_with_single_ages_and_85 = as.numeric(gsub("\\D", "", Age_recode_with_single_ages_and_85)),
+                Race.ethnicity_nototal=relevel( factor(Race.ethnicity_nototal),ref="Non-Hispanic White"),
+                Sex_nototal=relevel(factor(Sex_nototal),ref="Female"),
+                Crude_Rate = (Count /Population )*100000,
+                age_group=cut(Age_recode_with_single_ages_and_85,breaks = seq(0,90,10),include.lowest = TRUE,right=F))
+
+```
+
+```{r run models, include=FALSE, cache=TRUE}
+##POISSON REGRESSION USING GLM TO ASSESS INTERACTION BETWEEN INCIDENT COUNTS AND INTERACTION OF SEX AND RACE/ETHNICITY AGJUSTING FOR OTHER FACTORS. 
+meningioma_interaction_model1 <- glm(Count ~ offset(log(Population/100000)) + Age_recode_with_single_ages_and_85 + Sex_nototal* Race.ethnicity_nototal , 
+                                     family="poisson", data=meningioma.data1)
+
+meningioma_interaction_model1_agegroup_strata <-  meningioma.data1 %>%
+  dplyr::nest(.data=., .by=c(age_group ),.key="data") %>%
+  dplyr::mutate(interaction=map(.x=data, ~ glm( Count ~ offset(log(Population/100000)) + Age_recode_with_single_ages_and_85+  Sex_nototal* Race.ethnicity_nototal , 
+                                                family="poisson", data=.x)))
+
+meningioma_interaction_model2 <- meningioma.data2 %>% 
+  dplyr::nest(.data=., .by=c(Meningioma_grade_ICDO3_simp ),.key="data") %>%
+  dplyr::mutate(interaction=map(.x=data, ~ glm( Count ~ offset(log(Population/100000)) + Age_recode_with_single_ages_and_85 + Sex_nototal* Race.ethnicity_nototal , 
+                                                family="poisson", data=.x))) 
+
+meningioma_interaction_model2_agegroup_strata <-  meningioma.data2 %>%
+  dplyr::nest(.data=., .by=c(Meningioma_grade_ICDO3_simp,age_group ),.key="data") %>%
+  dplyr::mutate(interaction=map(.x=data, ~ glm( Count ~ offset(log(Population/100000)) + Age_recode_with_single_ages_and_85 +  Sex_nototal* Race.ethnicity_nototal , 
+                                                family="poisson", data=.x)))
+
+
+meningioma_interaction_model3 <- meningioma.data3 %>% 
+  dplyr::nest(.data=., .by=c(Diagnostic_Confirmation_simplified  ),.key="data") %>%
+  dplyr::mutate(interaction=map(.x=data, ~ glm( Count ~ offset(log(Population/100000)) + Age_recode_with_single_ages_and_85 + Sex_nototal* Race.ethnicity_nototal , 
+                                                family="poisson", data=.x))) 
+
+meningioma_interaction_model3_agegroup_strata <-  meningioma.data3 %>%
+  dplyr::nest(.data=., .by=c(Diagnostic_Confirmation_simplified ,age_group ),.key="data") %>%
+  dplyr::mutate(interaction=map(.x=data, ~ glm( Count ~ offset(log(Population/100000)) + Age_recode_with_single_ages_and_85 +  Sex_nototal* Race.ethnicity_nototal , 
+                                                family="poisson", data=.x)))
+
+```
+
+
+```{r tables a, echo=FALSE}
+##CREATE TABLE OF POISSON REGRESSION RESULTS FOR EXPORT
+gtsummary::tbl_regression(meningioma_interaction_model1,
+                          exponentiate = TRUE,
+                          label=c(Sex_nototal~"Sex",Race.ethnicity_nototal~ "Race/ethnicity",Age_recode_with_single_ages_and_85~"Age")) %>%
+  gtsummary::modify_caption("Table 1. Coefficients from overall interaction model")
+
+```
+\newpage
+
+```{r tables b, echo=FALSE}
+##CREATES TABLE TO CONTRAST INTERACTION MODEL BY SEX AND RACE/ETHNICITY
+table1 <- modelbased::estimate_contrasts(meningioma_interaction_model1,contrast=c("Sex_nototal","Race.ethnicity_nototal"),
+                                         transform="response")
+
+cat("\n")
+
+reformat_contrast(table1) %>%
+  dplyr::select(c("Level1","Level2","ratio_print","p")) %>%
+  flextable::flextable() %>%
+  flextable::set_header_labels("ratio_print"="Ratio (95% CI)") %>%
+  flextable::add_header_lines("Table 2. Estimated contrasts from overall interaction model")
+
+``` 
+\newpage
+
+```{r tables1a, echo=FALSE}
+##MERGES POISSON REGRESSION AND CONTRAST TABLE FOR EXPORTING
+gtsummary::tbl_merge(lapply(meningioma_interaction_model1_agegroup_strata$interaction, 
+                            function(x) gtsummary::tbl_regression(x,exponentiate = TRUE,label=c(Sex_nototal~"Sex",Race.ethnicity_nototal~ "Race/ethnicity",Age_recode_with_single_ages_and_85~"Age"))), 
+                     tab_spanner = c("0-9","10-19","20-29","30-39","40-49","50-59","60-69","70-79","80+")) %>%
+  gtsummary::modify_caption("Table 3. Coefficients from age-stratified interaction models")
+
+``` 
+
+\newpage
+```{r tables1b, echo=FALSE, results='asis'}
+##CREATES TABLE TO CONTRAST INTERACTION MODEL BY SEX AND RACE/ETHNICITY AND AGE GROUP AT DIAGNOSIS
+contrasts_strata <- lapply(meningioma_interaction_model1_agegroup_strata$interaction, function(x)
+  modelbased::estimate_contrasts(x,contrast=c("Sex_nototal","Race.ethnicity_nototal"),
+                                 transform="response"))
+names(contrasts_strata) <- c("0-9","10-19","20-29","30-39","40-49","50-59","60-69","70-79","80+")
+
+
+lapply(contrasts_strata, function(x) reformat_contrast(x)) %>%
+  dplyr::bind_rows(.,.id="Age group") %>%
+  dplyr::select(c("Age group","Level1","Level2","ratio_print","p")) %>%
+  dplyr::rename("Ratio (95% CI)"="ratio_print") %>%
+  flextable() %>%
+  merge_v(j=1) %>%
+  add_header_lines("Table 4. Estimated contrasts from age-stratified interaction model")
+
+```
+\newpage
+```{r tables2, echo=FALSE, results='asis'}
+##MERGES POISSON REGRESSION AND CONTRAST TABLE FOR EXPORTING
+gtsummary::tbl_merge(lapply(meningioma_interaction_model2$interaction, 
+                            function(x) gtsummary::tbl_regression(x,
+                                                                  exponentiate = TRUE,
+                                                                  label=c(Sex_nototal~"Sex",Race.ethnicity_nototal~ "Race/ethnicity",Age_recode_with_single_ages_and_85~"Age"))), 
+                     tab_spanner = c("Grade I","Grade II/III")) %>%
+  gtsummary::modify_caption("Table 5. Coefficients from grade-stratified interaction models")
+```
+\newpage
+```{r tables2b, echo=FALSE, results='asis'}
+##CREATES TABLE TO CONTRAST INTERACTION MODEL BY SEX AND RACE/ETHNICITY AND GRADE
+cat("\n")
+contrasts_grade <- lapply(meningioma_interaction_model2$interaction, function(x) 
+  modelbased::estimate_contrasts(x,contrast=c("Sex_nototal","Race.ethnicity_nototal"),
+                                 transform="response"))
+
+names(contrasts_grade) <- c("Grade I","Grade II/III")
+
+
+lapply(contrasts_grade, function(x) reformat_contrast(x)) %>%
+  dplyr::bind_rows(.,.id="Grade") %>%
+  dplyr::select(c("Grade","Level1","Level2","ratio_print","p")) %>%
+  dplyr::rename("Ratio (95% CI)"="ratio_print") %>%
+  flextable() %>%
+  merge_v(j=1) %>%
+  add_header_lines("Table 6. Estimated contrasts from grade-stratified interaction model")
+
+
+
+```
+\newpage
+```{r tables3, echo=FALSE, results='asis'}
+##MERGES POISSON REGRESSION AND CONTRAST TABLE FOR EXPORTING
+gtsummary::tbl_merge(lapply(meningioma_interaction_model2_agegroup_strata$interaction[which(meningioma_interaction_model2_agegroup_strata$Meningioma_grade_ICDO3_simp == "Grade I")], 
+                            function(x) gtsummary::tbl_regression(x,exponentiate = TRUE,label=c(Sex_nototal~"Sex",Race.ethnicity_nototal~ "Race/ethnicity",Age_recode_with_single_ages_and_85~"Age"))), 
+                     tab_spanner = c("0-9","10-19","20-29","30-39","40-49","50-59","60-69","70-79","80+")) %>%
+  gtsummary::modify_caption("Table 7. Coefficients from age-stratified interaction models, Grade I only")
+```
+\newpage
+```{r tables3b, echo=FALSE, results='asis'}
+##CREATES TABLE TO CONTRAST INTERACTION MODEL BY SEX AND RACE/ETHNICITY AND AGE GROUP AT DIAGNOSIS AMONG GRADE I CASES ONLY
+cat("\n")
+contrasts_grade_strata1 <- lapply(meningioma_interaction_model2_agegroup_strata$interaction[which(meningioma_interaction_model2_agegroup_strata$Meningioma_grade_ICDO3_simp == "Grade I")], function(x) 
+  modelbased::estimate_contrasts(x,contrast=c("Sex_nototal","Race.ethnicity_nototal"),
+                                 transform="response"))
+
+names(contrasts_grade_strata1) <- c("0-9","10-19","20-29","30-39","40-49","50-59","60-69","70-79","80+")
+
+
+
+lapply(contrasts_grade_strata1, function(x) reformat_contrast(x)) %>%
+  dplyr::bind_rows(.,.id="Age group") %>%
+  dplyr::select(c("Age group","Level1","Level2","ratio_print","p")) %>%
+  dplyr::rename("Ratio (95% CI)"="ratio_print") %>%
+  flextable() %>%
+  merge_v(j=1) %>%
+  add_header_lines("Table 8. Estimated contrasts from age-stratified interaction model (Grade I Only)")
+
+
+```
+\newpage
+```{r tables4, echo=FALSE, results='asis'}
+##MERGES POISSON REGRESSION AND CONTRAST TABLE FOR EXPORTING
+gtsummary::tbl_merge(lapply(meningioma_interaction_model2_agegroup_strata$interaction[which(meningioma_interaction_model2_agegroup_strata$Meningioma_grade_ICDO3_simp == "Grade II/III")], 
+                            function(x) gtsummary::tbl_regression(x,exponentiate = TRUE,label=c(Sex_nototal~"Sex",Race.ethnicity_nototal~ "Race/ethnicity",Age_recode_with_single_ages_and_85~"Age"))), 
+                     tab_spanner = c("0-9","10-19","20-29","30-39","40-49","50-59","60-69","70-79","80+")) %>%
+  gtsummary::modify_caption("Table 9. Coefficients from age-stratified interaction models, Grade II/III only")
+```
+\newpage
+```{r tables4b, echo=FALSE, results='asis'}
+##CREATES TABLE TO CONTRAST INTERACTION MODEL BY SEX AND RACE/ETHNICITY AND AGE GROUP AT DIAGNOSIS AMONG GRADE II/III CASES ONLY
+cat("\n")
+
+contrasts_grade_strata2 <- lapply(meningioma_interaction_model2_agegroup_strata$interaction[which(meningioma_interaction_model2_agegroup_strata$Meningioma_grade_ICDO3_simp == "Grade II/III")], function(x) 
+  modelbased::estimate_contrasts(x,contrast=c("Sex_nototal","Race.ethnicity_nototal"),
+                                 transform="response"))
+
+names(contrasts_grade_strata2) <- c("0-9","10-19","20-29","30-39","40-49","50-59","60-69","70-79","80+")
+
+
+lapply(contrasts_grade_strata2, function(x) reformat_contrast(x)) %>%
+  dplyr::bind_rows(.,.id="Age group") %>%
+  dplyr::select(c("Age group","Level1","Level2","ratio_print","p")) %>%
+  dplyr::rename("Ratio (95% CI)"="ratio_print") %>%
+  flextable() %>%
+  merge_v(j=1) %>%
+  add_header_lines("Table 10. Estimated contrasts from age-stratified interaction model (Grade II/II Only)")
+
+```
+\newpage
+```{r tables5, echo=FALSE, results='asis'}
+##MERGES POISSON REGRESSION AND CONTRAST TABLE FOR EXPORTING
+gtsummary::tbl_merge(lapply(meningioma_interaction_model3$interaction, 
+                            function(x) gtsummary::tbl_regression(x,exponentiate = TRUE,
+                                                                  label=c(Sex_nototal~"Sex",Race.ethnicity_nototal~ "Race/ethnicity",Age_recode_with_single_ages_and_85~"Age"))), 
+                     tab_spanner = c("Microscopically confirmed","Radiography without microscopic confirm","Other")) %>%
+  gtsummary::modify_caption("Table 11. Coefficients from confirmation-stratified interaction models")
+```
+\newpage
+```{r tables5b, echo=FALSE, results='asis'}
+##CREATES TABLE TO CONTRAST INTERACTION MODEL BY SEX AND RACE/ETHNICITY BY CONFIRMATION
+cat("\n")
+contrasts_confirmation <- lapply(meningioma_interaction_model3$interaction, function(x) 
+  modelbased::estimate_contrasts(x,contrast=c("Sex_nototal","Race.ethnicity_nototal"),
+                                 transform="response"))
+
+names(contrasts_confirmation) <- c("Microscopically confirmed","Radiography without microscopic confirm","Other")
+
+lapply(contrasts_confirmation, function(x) reformat_contrast(x)) %>%
+  dplyr::bind_rows(.,.id="Diagostic confirmation") %>%
+  dplyr::select(c("Diagostic confirmation","Level1","Level2","ratio_print","p")) %>%
+  dplyr::rename("Ratio (95% CI)"="ratio_print") %>%
+  flextable() %>%
+  merge_v(j=1) %>%
+  add_header_lines("Table 12. Estimated contrasts from confirmation-stratified interaction model")
+
+
+```
+\newpage
+```{r tables6, echo=FALSE, results='asis'}
+##MERGES POISSON REGRESSION AND CONTRAST TABLE FOR EXPORTING
+gtsummary::tbl_merge(lapply(meningioma_interaction_model3_agegroup_strata$interaction[which(meningioma_interaction_model3_agegroup_strata$Diagnostic_Confirmation_simplified == "Microscopically confirmed")], 
+                            function(x) gtsummary::tbl_regression(x,exponentiate = TRUE,label=c(Sex_nototal~"Sex",Race.ethnicity_nototal~ "Race/ethnicity",Age_recode_with_single_ages_and_85~"Age"))), 
+                     tab_spanner = c("0-9","10-19","20-29","30-39","40-49","50-59","60-69","70-79","80+")) %>%
+  gtsummary::modify_caption("Table 13. Coefficients from age-stratified interaction models, Microscopically confirmed only")
+cat("\n")
+```
+\newpage
+```{r tables6b, echo=FALSE, results='asis'}
+##CREATES TABLE TO CONTRAST INTERACTION MODEL BY SEX AND RACE/ETHNICITY AND AGE GROUP AT DIAGNOSIS AMONG MICROSCOPICALLY CONFIRMED CASES ONLY
+
+contrasts_confirmation_strata1 <- lapply(meningioma_interaction_model3_agegroup_strata$interaction[which(meningioma_interaction_model3_agegroup_strata$Diagnostic_Confirmation_simplified == "Microscopically confirmed")], function(x) 
+  modelbased::estimate_contrasts(x,contrast=c("Sex_nototal","Race.ethnicity_nototal"),
+                                 transform="response"))
+
+names(contrasts_confirmation_strata1) <- c("0-9","10-19","20-29","30-39","40-49","50-59","60-69","70-79","80+")
+
+lapply(contrasts_confirmation_strata1, function(x) reformat_contrast(x)) %>%
+  dplyr::bind_rows(.,.id="Age group") %>%
+  dplyr::select(c("Age group","Level1","Level2","ratio_print","p")) %>%
+  dplyr::rename("Ratio (95% CI)"="ratio_print") %>%
+  flextable() %>%
+  merge_v(j=1) %>%
+  add_header_lines("Table 14. Estimated contrasts from age-stratified interaction model (Microscopically confirmed only)")
+
+
+```
+\newpage
+```{r tables7, echo=FALSE, results='asis'}
+##MERGES POISSON REGRESSION AND CONTRAST TABLE FOR EXPORTING
+gtsummary::tbl_merge(lapply(meningioma_interaction_model3_agegroup_strata$interaction[which(meningioma_interaction_model3_agegroup_strata$Diagnostic_Confirmation_simplified == "Radiography without microscopic confirm")], 
+                            function(x) gtsummary::tbl_regression(x,label=c(Sex_nototal~"Sex",Race.ethnicity_nototal~ "Race/ethnicity",Age_recode_with_single_ages_and_85~"Age"))), 
+                     tab_spanner = c("0-9","10-19","20-29","30-39","40-49","50-59","60-69","70-79","80+")) %>%
+  gtsummary::modify_caption("Table 15. Coefficients from age-stratified interaction models, Radiographically confirmed only")
+
+```
+\newpage
+```{r tables7b, echo=FALSE, results='asis'}
+##CREATES TABLE TO CONTRAST INTERACTION MODEL BY SEX AND RACE/ETHNICITY AND AGE GROUP AT DIAGNOSIS AMONG RADIOGRAPHICALLY CONFIRMED CASES ONLY
+cat("\n")
+
+contrasts_confirmation_strata2 <- lapply(meningioma_interaction_model3_agegroup_strata$interaction[which(meningioma_interaction_model3_agegroup_strata$Diagnostic_Confirmation_simplified == "Radiography without microscopic confirm")], function(x) 
+  modelbased::estimate_contrasts(x,contrast=c("Sex_nototal","Race.ethnicity_nototal"),
+                                 transform="response"))
+
+names(contrasts_confirmation_strata2) <- c("0-9","10-19","20-29","30-39","40-49","50-59","60-69","70-79","80+")
+
+lapply(contrasts_confirmation_strata2, function(x) reformat_contrast(x)) %>%
+  dplyr::bind_rows(.,.id="Age group") %>%
+  dplyr::select(c("Age group","Level1","Level2","ratio_print","p")) %>%
+  dplyr::rename("Ratio (95% CI)"="ratio_print") %>%
+  flextable() %>%
+  merge_v(j=1) %>%
+  add_header_lines("Table 16. Estimated contrasts from age-stratified interaction model (Radiographically confirmed only)")
+
+```
+#######Figures
+\newpage
+```{r Figure1,include=F}
+##LOAD AND FORMAT INCIDENCE RATE RATIO DATA BY RACE/ETHNICITY, SEX, AND AGE
+irr.data1<-read.delim("IRR_race_age_sex.txt") %>%
+  dplyr::rename_all(make.names) %>%
+  dplyr::filter(Race.ethnicity_nototal %in% c("Non-Hispanic White","Non-Hispanic Black"))%>%
+  #LABELS FOR SIGNIFICANT IRRS WITH P-VALUE<0.05
+  dplyr::mutate(z=dplyr::case_when(Race.ethnicity_nototal=="Non-Hispanic Black"&ten_agegroup=="40-49"&Sex_nototal=="Male"~"*", 
+                            Race.ethnicity_nototal=="Non-Hispanic Black"&ten_agegroup=="50-59"&Sex_nototal=="Male"~"*",
+                            Race.ethnicity_nototal=="Non-Hispanic Black"&ten_agegroup=="60-69"&Sex_nototal=="Male"~"*",
+                            Race.ethnicity_nototal=="Non-Hispanic Black"&ten_agegroup=="70-79"&Sex_nototal=="Male"~"*",
+                            T~"")) %>%
+  dplyr::rename("Sex"="Sex_nototal")
+
+##CREATE PLOT OF IRR AND CONFIDENCE INTERVALS BY TEN YEAR AGE GROUP
+figure1=ggplot2::ggplot(data = irr.data1, aes(x = ten_agegroup, y = Rate.Ratio,group=Sex))+
+  ggplot2::geom_point(aes(shape=Sex),size=3,na.rm=TRUE,position=position_dodge(width=.5)) + 
+  ggplot2::geom_text(aes(x=ten_agegroup, y=Ratio.Upper.Confidence.Interval,label=z),position = position_dodge(0.5),vjust=-.75,hjust=.75,size=7) +
+  ggplot2::ylim(limits=c(0.2,1.8)) +
+  ggplot2::geom_errorbar(aes(ymin = Ratio.Lower.Confidence.Interval, ymax = Ratio.Upper.Confidence.Interval), width = 0.5,size=.5,na.rm=TRUE,position=position_dodge(width=.5)) +
+  ggplot2::labs(x = "Age Group at Diagnosis (Years)",
+                y = "Incidence Rate Ratio (Black NH:White NH)",
+                fill="Sex",
+                caption = "* Race/ethnicity and sex interaction was significant with p-value<0.05") +
+  ggplot2::geom_hline(yintercept=1,linetype="dashed") +
+  ggplot2::theme_classic()
+figure1
+##EXPORT FIGURE
+ggplot2::ggsave("Figure_1.png")
+```
+\newpage
+```{r, Figure2,include=F}
+##LOAD AND FORMAT INCIDENCE RATE RATIO DATA BY RACE/ETHNICITY, SEX, AGE, AND GRADE
+irr.data2<-read.delim("IRR_race_age_sex_grade.txt") %>%
+  dplyr::rename_all(make.names) %>%
+  dplyr::filter(Race.ethnicity_nototal %in% c("Non-Hispanic White","Non-Hispanic Black"))%>%
+  #MARK THOSE WITH SIGNIFICANT IRR P-VALUE<0.05 FOR PLOT
+  dplyr::mutate(z=dplyr::case_when(Race.ethnicity_nototal=="Non-Hispanic Black"&ten_agegroup=="40-49"&Sex_nototal=="Male"&Meningioma_grade_ICDO3_simp=="Grade I"~"*",
+                            Race.ethnicity_nototal=="Non-Hispanic Black"&ten_agegroup=="50-59"&Sex_nototal=="Male"&Meningioma_grade_ICDO3_simp=="Grade I"~"*",
+                            Race.ethnicity_nototal=="Non-Hispanic Black"&ten_agegroup=="60-69"&Sex_nototal=="Male"&Meningioma_grade_ICDO3_simp=="Grade I"~"*",
+                            Race.ethnicity_nototal=="Non-Hispanic Black"&ten_agegroup=="70-79"&Sex_nototal=="Male"&Meningioma_grade_ICDO3_simp=="Grade I"~"*",
+                            Race.ethnicity_nototal=="Non-Hispanic Black"&ten_agegroup=="10-19"&Sex_nototal=="Male"&Meningioma_grade_ICDO3_simp=="Grade II/III"~"*",
+                            Race.ethnicity_nototal=="Non-Hispanic Black"&ten_agegroup=="20-29"&Sex_nototal=="Female"&Meningioma_grade_ICDO3_simp=="Grade II/III"~"*",
+                            Race.ethnicity_nototal=="Non-Hispanic Black"&ten_agegroup=="50-59"&Sex_nototal=="Male"&Meningioma_grade_ICDO3_simp=="Grade II/III"~"*",
+                            T~""))%>%
+  dplyr::rename("Sex"="Sex_nototal")
+
+##CREATE PLOT OF IRR AND CONFIDENCE INTERVALS BY TEN YEAR AGE GROUP AND GRADE
+figure2=ggplot2::ggplot(data = irr.data2, aes(x = ten_agegroup, y = Rate.Ratio,group=Sex))+
+  ggplot2::geom_point(aes(shape=Sex),size=2,na.rm=TRUE,position=position_dodge(width=.5)) + 
+  ggplot2::geom_text(aes(x=ten_agegroup, y=Ratio.Upper.Confidence.Interval,label=z),position = position_dodge(0.5),vjust=-.75,hjust=.75,size=7) +
+  ggplot2::ylim(limits=c(0.1,2.5)) +
+  ggplot2::geom_errorbar(aes(ymin = Ratio.Lower.Confidence.Interval, ymax = Ratio.Upper.Confidence.Interval), width = 0.25,size=.5,na.rm=TRUE,position=position_dodge(width=.5)) +
+  ggplot2::labs(x = "Age Group at Diagnosis (Years)",
+                y = "Incidence Rate Ratio (Black NH:White NH)",
+                caption = "* Race/ethnicity and sex interaction was significant with p-value<0.05",
+                fill="Sex") +
+  ggplot2::geom_hline(yintercept=1,linetype="dashed") +
+  ggplot2::facet_grid(. ~ Meningioma_grade_ICDO3_simp) + 
+  ggplot2::theme_classic()
+figure2
+
+##EXPORT FIGURE
+ggplot2::ggsave("Figure_2.png", height=7,width=10)
+```
+\newpage
+```{r, Supp_Figure1,Include=F}
+##LOAD AND FORMAT INCIDENCE RATE RATIO DATA BY RACE/ETHNICITY, SEX, AGE, AND CONFIRMATION
+irr.data3<-read.delim("IRR_race_age_sex_confirmation.txt") %>%
+  dplyr::rename_all(make.names) %>%
+  dplyr::filter(Race.ethnicity_nototal %in% c("Non-Hispanic White","Non-Hispanic Black"))%>%
+  #MARK THOSE WITH SIGNIFICANT IRR P-VALUE<0.05 FOR PLOT
+  dplyr::mutate(z=dplyr::case_when(Race.ethnicity_nototal=="Non-Hispanic Black"&ten_agegroup=="40-49"&Sex_nototal=="Male"&Diagnostic.Confirmation..simplified.=="Microscopically confirmed"~"*",
+                            Race.ethnicity_nototal=="Non-Hispanic Black"&ten_agegroup=="50-59"&Sex_nototal=="Male"&Diagnostic.Confirmation..simplified.=="Microscopically confirmed"~"*",
+                            Race.ethnicity_nototal=="Non-Hispanic Black"&ten_agegroup=="60-69"&Sex_nototal=="Male"&Diagnostic.Confirmation..simplified.=="Microscopically confirmed"~"*",
+                            Race.ethnicity_nototal=="Non-Hispanic Black"&ten_agegroup=="70-79"&Sex_nototal=="Male"&Diagnostic.Confirmation..simplified.=="Microscopically confirmed"~"*",
+                            Race.ethnicity_nototal=="Non-Hispanic Black"&ten_agegroup=="0-9"&Sex_nototal=="Male"&Diagnostic.Confirmation..simplified.=="Radiography without microscopic confirm"~"*",
+                            Race.ethnicity_nototal=="Non-Hispanic Black"&ten_agegroup=="10-19"&Sex_nototal=="Female"&Diagnostic.Confirmation..simplified.=="Radiography without microscopic confirm"~"*",
+                            Race.ethnicity_nototal=="Non-Hispanic Black"&ten_agegroup%in%c("30-39","40-49","50-59","60-69","70-79")&Sex_nototal=="Male"&Diagnostic.Confirmation..simplified.=="Radiography without microscopic confirm"~"*",
+                            T~""),
+                Diagnostic.Confirmation..simplified.=dplyr::case_when(Diagnostic.Confirmation..simplified.=="Radiography without microscopic confirm"~"Radiographic Confirmation Only",
+                                                               Diagnostic.Confirmation..simplified.=="Microscopically confirmed"~"Microscopic Confirmation Only",
+                                                               T~"Other")) %>%
+  dplyr::rename("Sex"="Sex_nototal")%>%
+  dplyr::filter(Diagnostic.Confirmation..simplified.!="Other")
+
+##CREATE PLOT OF IRR AND CONFIDENCE INTERVALS BY TEN YEAR AGE GROUP AND CONFIRMATION
+supp_figure1=ggplot2::ggplot(data = irr.data3, aes(x = ten_agegroup, y = Rate.Ratio,group=Sex))+
+  ggplot2::geom_point(aes(shape=Sex),size=2,na.rm=TRUE,position=position_dodge(width=.5)) + 
+  ggplot2::geom_text(aes(x=ten_agegroup, y=Ratio.Upper.Confidence.Interval,label=z),position = position_dodge(0.5),vjust=-.75,hjust=.75,size=7) +
+  ggplot2::ylim(limits=c(0.1,6)) +
+  ggplot2::geom_errorbar(aes(ymin = Ratio.Lower.Confidence.Interval, ymax = Ratio.Upper.Confidence.Interval), width = 0.25,size=.5,na.rm=TRUE,position=position_dodge(width=.5)) +
+  ggplot2::labs(x = "Age Group at Diagnosis (Years)",
+                y = "Incidence Rate Ratio (Black NH:White NH)",
+                caption = "* Race/ethnicity and sex interaction was significant with p-value<0.05",
+                fill="Sex") +
+  ggplot2::geom_hline(yintercept=1,linetype="dashed") +
+  ggplot2::facet_grid(. ~ Diagnostic.Confirmation..simplified.) + 
+  ggplot2::theme_classic()
+supp_figure1
+
+##EXPORT FIGURE
+ggplot2::ggsave("supp_figure1.png",height=7,width=10)
+```
+
+```{r, Figure3, eval=F, include=FALSE}
+##LOAD AND FORMAT INCIDENCE RATE RATIO DATA BY RACE/ETHNICITY, SEX, AND AGE
+irr.data3<-read.SeerStat("Meningioma_race_sex_grade", UseVarLabelsInData = TRUE) %>%
+  dplyr::rename_all(make.names) %>%
+  dplyr::rename("race_ethnicity"="Race.ethnicity_nototal","Sex"="Sex_nototal","men_groupgrade"="Meningioma_grade_ICDO3_simp") %>%
+  dplyr::filter(race_ethnicity %in% c("Non-Hispanic White","Non-Hispanic Black")&Sex!= "Male and female") %>%
+  #MARK THOSE WITH SIGNIFICANT IRR P-VALUE<0.05 FOR PLOT
+  dplyr::mutate(z=dplyr::case_when(Ratio_PValue<0.05~"*",
+                            T~""))
+##CREATE PLOT OF IRR AND CONFIDENCE INTERVALS BY RACE/ETHNICITY
+figure3=ggplot2::ggplot(data = irr.data3, aes(x = race_ethnicity, group=Sex, y = AgeAdjusted_Rate ,fill=Sex))+
+  ggplot2::geom_col(na.rm=TRUE,position=position_dodge(width=1)) + 
+  ggplot2::geom_errorbar(aes(ymin = Lower_Confidence_Interval, ymax = Upper_Confidence_Interval), width =1, size=.5,na.rm=TRUE,position=position_dodge(width=.5)) +
+  ggplot2::labs(x = "Age Group at Diagnosis (Years)",
+                y = "Incidence Rate Ratio (Female:Male)") +
+  ggplot2::facet_wrap(. ~ men_groupgrade,scales="free_y") + 
+  ggplot2::theme_classic()
+figure3
+```
+
+```{r incidence_maps}
+##LOAD COUNTY-LEVEL COUNTS AND INCIDENCE FROM SEER*STAT FILES
+inc.data<-read.SeerStat("SEERStat/incidence_map_race", UseVarLabelsInData = TRUE) %>%
+  dplyr::rename_all(make.names) 
+
+map.data<-cbind(stringr::str_split_fixed(inc.data$Statecounty,": ",2), #SPLIT STATE FROM STATE,COUNTY,FIPS STRING
+                stringr::str_split_fixed(inc.data$Statecounty,"\\(",2), #ISOLATE FIPS
+                inc.data)%>%
+  dplyr::rename("State"="1", "trash"="2")%>%
+  dplyr::select(!"trash")%>%
+  dplyr::rename("fix"="2")
+
+map.data<-cbind(stringr::str_split_fixed(map.data$fix,"\\)",2), #ISOLATE FIPS
+                map.data)%>%
+  dplyr::rename("fips"="1","trash"="2")%>%
+  dplyr::select(!c("trash","1","fix"))%>%
+  dplyr::filter(fips!="") #FILTER OUT BLANK FIPS (STATE ROWS AND INVALID COUNTY)
+
+##MERGE INCIDENCE/COUNT DATA AND MAP DATA FOR FIGURE
+map.data<-merge(map.data,usmap::us_map(region="counties")%>%
+                  dplyr::select(fips,geom),by="fips")
+
+##GENERATE INCIDENCE FIGURES
+MAPS<-NULL
+
+#loops through the groups to creat individual figures for each
+group=c("Overall","Non-Hispanic Black","Non-Hispanic White") 
+
+for(x in group) {
+  
+  limits=map.data%>%
+    dplyr::filter(Race.ethnicity_nototal==x)%>%
+    dplyr::group_by(Race.ethnicity_nototal)%>%
+    dplyr::summarise(max=max(AgeAdjusted_Rate,na.rm=T),
+                     min=min(AgeAdjusted_Rate,na.rm=T),
+                     median=median(AgeAdjusted_Rate,na.rm=T))
+  
+  MAPS[["AAIR"]][[x]]<-ggplot2::ggplotGrob(usmap::plot_usmap(data = map.data%>%dplyr::filter(Race.ethnicity_nototal==x), regions=c("counties"),values = "AgeAdjusted_Rate", color = NA)+
+                                             scale_fill_gradient2(low = "blue",
+                                                                  mid="white",
+                                                                  high="red",
+                                                                  na.value = "gray80",
+                                                                  limits = c(limits$min,limits$max),
+                                                                  midpoint = limits$median,
+                                                                  name=paste("Average Annual Age-Adjusted\nIncidence per 100,000\nPopulation",sep=""),
+                                                                  guide =guide_colourbar(title.position="top"))+
+                                             ggplot2::theme(legend.title = element_text(size=24, face="bold"),
+                                                            legend.text = element_text(size=20),
+                                                            legend.position = c(.75,0),
+                                                            legend.key.width = unit(1,"in"),
+                                                            legend.direction="horizontal",
+                                                            title=element_text(size=35,face="bold"))+
+                                             ggplot2::labs(title=sprintf("%s",x)))
+  
+  MAPS[["AAIR"]][[x]]<-ggpubr::as_ggplot( MAPS[["AAIR"]][[x]])
+  for (format in c("pdf","png")) {
+    ggplot2::ggsave(file=paste(x,"_AAIR_",Sys.Date(),".",format,sep=""),device=format,height=15,width=30)}
+}
+
+group=c("Overall","Non-Hispanic Black","Non-Hispanic White") 
+
+for(x in group) {
+  
+  limits=map.data%>%
+    dplyr::filter(Race.ethnicity_nototal==x)%>%
+    dplyr::group_by(Race.ethnicity_nototal)%>%
+    dplyr::summarise(max=max(Count,na.rm=T))
+  
+  MAPS[["count"]][[x]]<-ggplot2::ggplotGrob(usmap::plot_usmap(data = map.data%>%dplyr::filter(Race.ethnicity_nototal==x), regions=c("counties"),values = "Count", color = NA)+
+                                              viridis::scale_fill_viridis(direction=-1,
+                                                                          option="inferno",
+                                                                          na.value = "lightgrey",
+                                                                          limits = c(0,limits$max),
+                                                                          name=paste("Case Count",sep=""),
+                                                                          guide =guide_colourbar(title.position="top"))+
+                                              ggplot2::theme(legend.title = element_text(size=24, face="bold"),
+                                                             legend.text = element_text(size=20),
+                                                             legend.position = c(.75,0),
+                                                             legend.key.width = unit(1,"in"),
+                                                             legend.direction="horizontal",
+                                                             title=element_text(size=35,face="bold"))+
+                                              ggplot2::labs(title=sprintf("%s",x)))
+  
+  MAPS[["count"]][[x]]<-ggpubr::as_ggplot( MAPS[["count"]][[x]])
+  for (format in c("pdf","png")) {
+    ggplot2::ggsave(file=paste(x,"_count_",Sys.Date(),".",format,sep=""),device=format,height=15,width=30)}
+}
+```
